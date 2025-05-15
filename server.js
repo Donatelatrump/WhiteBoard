@@ -13,26 +13,36 @@ const io = new Server(server, {
 
 let drawCommands = []; // Aquí guardamos TODOS los trazos
 
-app.use(express.static(path.join(__dirname, 'public'))); // Sirve archivos estáticos (tu HTML irá en 'public/')
+app.use(express.static(path.join(__dirname, 'public')));
 
+// Manejar conexiones de clientes
 io.on('connection', (socket) => {
   console.log('Usuario conectado:', socket.id);
 
-  // Alguien pide historial
+  // Cuando alguien pide el historial
   socket.on('request-history', () => {
     socket.emit('history', drawCommands);
   });
 
-  // Alguien dibuja algo
+  // Cuando alguien dibuja algo nuevo
   socket.on('draw', (stroke) => {
     drawCommands.push(stroke);
-    socket.broadcast.emit('draw', stroke); // Enviar a todos menos al que lo hizo
+    socket.broadcast.emit('draw', stroke);
   });
 
-  // Alguien limpia el canvas
+  // Cuando alguien limpia todo
   socket.on('clear', () => {
     drawCommands = [];
-    io.emit('clear'); // Enviar a todos
+    io.emit('clear');
+  });
+
+  // ⚡ NUEVO: Cuando alguien actualiza todo el historial
+  socket.on('update-history', (newDrawCommands) => {
+    drawCommands = newDrawCommands;
+    io.emit('clear'); // Primero limpiar a todos
+    for (const stroke of drawCommands) {
+      io.emit('draw', stroke);
+    }
   });
 
   socket.on('disconnect', () => {

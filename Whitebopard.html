@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whiteboard Estable</title>
+  <style>
+    body { margin: 0; overflow: hidden; height: 100vh; background: #f9f9f9; display: flex; flex-direction: column; }
+    #toolbar { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.95); border-radius: 20px; padding: 10px 20px; display: flex; gap: 8px; align-items: center; box-shadow: 0 8px 16px rgba(0,0,0,0.2); z-index: 10; backdrop-filter: blur(10px); flex-wrap: wrap; }
+    #canvas-container { flex: 1; width: 100%; height: 100%; overflow: hidden; position: relative; }
+    canvas { position: absolute; top: 0; left: 0; background: white; touch-action: none; }
+    #overlay { pointer-events: none; background: transparent; }
+    #eraser-settings { position: absolute; display: none; background: white; padding: 10px; border-radius: 8px; box-shadow: 0px 0px 10px rgba(0,0,0,0.3); z-index: 20; }
+    button, input[type="color"], input[type="range"] { border: none; padding: 10px; border-radius: 12px; background: linear-gradient(145deg,#fff,#e6e6e6); box-shadow: 0 4px 6px rgba(0,0,0,0.1); cursor: pointer; font-weight: bold; transition: all 0.3s ease; font-size: 16px; }
+    button:hover:enabled, input[type="color"]:hover, input[type="range"]:hover { background: linear-gradient(145deg,#f0f0f0,#dcdcdc); transform: translateY(-2px); }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    @media (max-width:768px) { #toolbar{bottom:5px;padding:8px 12px;gap:6px;} button,input[type="color"],input[type="range"]{padding:8px;font-size:14px;} }
+  </style>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://whiteboard-iwrh.onrender.com/socket.io/socket.io.js"></script>
+</head>
+
+<body>
+
+<div id="toolbar">
+  <input type="color" id="colorPicker" title="Color">
+  <input type="range" id="brushSize" min="1" max="50" value="5" title="Tamaño del pincel">
+  <button id="draw" title="Dibujar"><i data-lucide="pencil"></i></button>
+  <button id="eraser" title="Borrador"><i data-lucide="eraser"></i></button>
+  <button id="pan" title="Mover lienzo"><i data-lucide="move"></i></button>
+  <button id="undo" title="Deshacer"><i data-lucide="rotate-ccw"></i></button>
+  <button id="redo" title="Rehacer"><i data-lucide="rotate-cw"></i></button>
+  <button id="zoomIn" title="Zoom +"><i data-lucide="zoom-in"></i></button>
+  <button id="zoomOut" title="Zoom -"><i data-lucide="zoom-out"></i></button>
+</div>
+
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="eraser-settings">
+  <label for="eraserSize">Tamaño del borrador:</label>
+  <input type="range" id="eraserSize" min="5" max="100" value="20">
+</div>
+
+<script>
+window.onload = function() {
+  const canvas = document.getElementById('canvas');
+  const overlay = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+  const overlayCtx = overlay.getContext('2d');
+  const socket = io('https://whiteboard-iwrh.onrender.com');
+
+  let drawCommands = [];
+  let redoStack = [];
+  let painting = false;
+  let currentStroke = [];
+  let mode = 'draw';
+  let color = '#000000';
+  let brushSize = 5;
+  let eraserSize = 20;
+  let scale = 1;
+  let viewOffsetX = 0, viewOffsetY = 0;
+  let showEraserCursor = false;
+  let mouseX = 0, mouseY = 0;
+  let lastPos = {x: 0, y: 0};
+  let erasing = false; // Nueva bandera
+
+  function initializeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    overlay.width = window.innerWidth;
+    overlay.height = window.innerHeight;
+    drawAll();
+  }
+
+  function drawAll() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, viewOffsetX, viewOffsetY);
+
+    for (const stroke of drawCommands) {
+      ctx.beginPath();
+      for (let i = 0; i < stroke.length; i++) {
+        const cmd = stroke[i];
+        if (i === 0) ctx.moveTo(cmd.x, cmd.y);
+        else ctx.lineTo(cmd.x, cmd.y);
+        ctx.lineWidth = cmd.brushSize;
+        ctx.strokeStyle = cmd.color;
+        ctx.lineCap = 'round';
+      }
+      ctx.stroke();
+    }
+  }
+
+  function drawCursor() {
+    overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    if (showEraserCursor && mode === 'eraser') {
+      overlayCtx.beginPath();
+      overlayCtx.arc(mouseX, mouseY, eraserSize / 2, 0, Math.PI * 2);
+      overlayCtx.strokeStyle = 'red';
+      overlayCtx.lineWidth = 2;
+      overlayCtx.stroke();
+    }
+    requestAnimationFrame(drawCursor);
+  }
+
+  function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left - viewOffsetX) / scale,
+      y: (e.clientY - rect.top - viewOffsetY) / scale
+    };
+  }
+
+  function startDrawing(e) {
+    const pos = getMousePos(e);
+    if (mode === 'pan') {
+      painting = true;
+      lastPos = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    if (mode === 'eraser') {
+      erasing = true;
+      return;
+    }
+    painting = true;
+    currentStroke = [];
+    ctx.beginPath();
+    ctx.moveTo(pos.x, pos.y);
+  }
+
+  function draw(e) {
+    const pos = getMousePos(e);
+
+    if (mode === 'pan' && painting) {
+      const dx = e.clientX - lastPos.x;
+      const dy = e.clientY - lastPos.y;
+      viewOffsetX += dx;
+      viewOffsetY += dy;
+      lastPos = { x: e.clientX, y: e.clientY };
+      drawAll();
+      return;
+    }
+
+    if (mode === 'eraser' && erasing) {
+      eraseAt(pos.x, pos.y);
+      drawAll();
+      return;
+    }
+
+    if (!painting) return;
+
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(pos.x, pos.y);
+
+    currentStroke.push({ x: pos.x, y: pos.y, color, brushSize });
+  }
+
+  function eraseAt(x, y) {
+    const newDrawCommands = [];
+
+    for (const stroke of drawCommands) {
+      let newStroke = [];
+      for (const point of stroke) {
+        const dist = Math.hypot(point.x - x, point.y - y);
+        if (dist >= eraserSize / 2) {
+          newStroke.push(point);
+        } else {
+          if (newStroke.length > 0) {
+            newDrawCommands.push(newStroke);
+            newStroke = [];
+          }
+        }
+      }
+      if (newStroke.length > 0) {
+        newDrawCommands.push(newStroke);
+      }
+    }
+    drawCommands = newDrawCommands;
+  }
+
+  function stopDrawing() {
+  if (mode === 'pan') {
+    painting = false;
+    return;
+  }
+
+  if (mode === 'eraser' && erasing) {
+    erasing = false;
+    // 🔥 Solución verdadera:
+    socket.emit('clear');
+    for (const stroke of drawCommands) {
+      socket.emit('draw', stroke); // ENVIAR strokes completos, no puntos individuales
+    }
+    return;
+  }
+
+  if (!painting) return;
+  painting = false;
+
+  if (currentStroke.length > 0) {
+    drawCommands.push(currentStroke);
+    socket.emit('draw', currentStroke); // Igualmente, enviar el stroke completo
+    redoStack = [];
+  }
+}
+
+  canvas.addEventListener('pointerdown', startDrawing);
+  canvas.addEventListener('pointermove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+    draw(e);
+  });
+  canvas.addEventListener('pointerup', stopDrawing);
+  canvas.addEventListener('pointercancel', stopDrawing);
+
+  document.getElementById('colorPicker').oninput = (e) => { color = e.target.value; };
+  document.getElementById('brushSize').oninput = (e) => { brushSize = e.target.value; };
+  document.getElementById('draw').onclick = () => { mode = 'draw'; showEraserCursor = false; hideEraserSettings(); };
+  document.getElementById('eraser').onclick = () => { mode = 'eraser'; showEraserCursor = true; hideEraserSettings(); };
+  document.getElementById('pan').onclick = () => { mode = 'pan'; showEraserCursor = false; hideEraserSettings(); };
+  document.getElementById('undo').onclick = () => { if (drawCommands.length > 0) { redoStack.push(drawCommands.pop()); drawAll(); } };
+  document.getElementById('redo').onclick = () => { if (redoStack.length > 0) { drawCommands.push(redoStack.pop()); drawAll(); } };
+  document.getElementById('zoomIn').onclick = () => { zoomCanvas(1.1); };
+  document.getElementById('zoomOut').onclick = () => { zoomCanvas(0.9); };
+
+  function zoomCanvas(factor) {
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    viewOffsetX -= (centerX - viewOffsetX) * (factor - 1);
+    viewOffsetY -= (centerY - viewOffsetY) * (factor - 1);
+    scale *= factor;
+    drawAll();
+  }
+
+  const eraserButton = document.getElementById('eraser');
+  const eraserSettings = document.getElementById('eraser-settings');
+  const eraserSizeInput = document.getElementById('eraserSize');
+
+  eraserButton.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    eraserSettings.style.left = `${e.clientX}px`;
+    eraserSettings.style.top = `${e.clientY}px`;
+    eraserSettings.style.display = 'block';
+  });
+
+  eraserSizeInput.addEventListener('input', (e) => {
+    eraserSize = parseInt(e.target.value);
+  });
+
+  function hideEraserSettings() {
+    eraserSettings.style.display = 'none';
+  }
+
+  socket.emit('request-history');
+  socket.on('history', (history) => { drawCommands = history; drawAll(); });
+  socket.on('draw', (stroke) => { drawCommands.push(stroke); drawAll(); });
+  socket.on('clear', () => { drawCommands = []; redoStack = []; drawAll(); });
+
+  window.addEventListener('resize', initializeCanvas);
+  initializeCanvas();
+  requestAnimationFrame(drawCursor);
+  lucide.createIcons();
+};
+</script>
+
+</body>
+</html>
