@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whiteboard Mejorado</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      height: 100vh;
+      background: #f9f9f9;
+      display: flex;
+      flex-direction: column;
+    }
+    #toolbar {
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 20px;
+      padding: 10px 20px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+      z-index: 10;
+      backdrop-filter: blur(10px);
+      flex-wrap: wrap;
+    }
+    #canvas-container {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      position: relative;
+    }
+    canvas {
+      position: absolute;
+      left: 0;
+      top: 0;
+      background: white;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    button, select, input[type="color"], input[type="range"] {
+      border: none;
+      padding: 10px;
+      border-radius: 12px;
+      background: linear-gradient(145deg, #ffffff, #e6e6e6);
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      cursor: pointer;
+      font-weight: bold;
+      transition: all 0.3s ease;
+      font-size: 16px;
+    }
+    button:hover:enabled, select:hover, input[type="color"]:hover, input[type="range"]:hover {
+      background: linear-gradient(145deg, #f0f0f0, #dcdcdc);
+      transform: translateY(-2px);
+    }
+    button:disabled {
+      background: #cccccc;
+      cursor: not-allowed;
+    }
+    @media (max-width: 768px) {
+      #toolbar {
+        bottom: 5px;
+        padding: 8px 12px;
+        gap: 6px;
+      }
+      button, select, input[type="color"], input[type="range"] {
+        padding: 8px;
+        font-size: 14px;
+      }
+    }
+  </style>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+
+<div id="toolbar">
+  <input type="color" id="colorPicker" title="Color">
+  <input type="range" id="brushSize" min="1" max="50" value="5" title="Tamaño del pincel">
+  <button id="draw" title="Dibujar"><i data-lucide="pencil"></i></button>
+  <button id="eraser" title="Borrador"><i data-lucide="eraser"></i></button>
+  <button id="undo" title="Deshacer"><i data-lucide="rotate-ccw"></i></button>
+  <button id="redo" title="Rehacer"><i data-lucide="rotate-cw"></i></button>
+  <button id="pan" title="Mover lienzo"><i data-lucide="move"></i></button>
+  <button id="zoomIn" title="Zoom +"><i data-lucide="zoom-in"></i></button>
+  <button id="zoomOut" title="Zoom -"><i data-lucide="zoom-out"></i></button>
+</div>
+
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let drawCommands = [];
+let redoStack = [];
+let painting = false;
+let currentStroke = [];
+let mode = 'draw';
+let color = '#000000';
+let brushSize = 5;
+let scale = 1;
+let viewOffsetX = 0, viewOffsetY = 0;
+let startX, startY;
+const socket = io();
+
+function initializeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  drawAll();
+}
+
+function drawAll() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, viewOffsetX, viewOffsetY);
+  for (const stroke of drawCommands) {
+    ctx.beginPath();
+    for (let i = 0; i < stroke.length; i++) {
+      const cmd = stroke[i];
+      if (i === 0) ctx.moveTo(cmd.x, cmd.y);
+      else ctx.lineTo(cmd.x, cmd.y);
+      ctx.lineWidth = cmd.brushSize;
+      ctx.strokeStyle = cmd.color;
+      ctx.lineCap = 'round';
+    }
+    ctx.stroke();
+  }
+}
+
+function getMousePos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left - viewOffsetX) / scale,
+    y: (e.clientY - rect.top - viewOffsetY) / scale
+  };
+}
+
+function startDrawing(e) {
+  painting = true;
+  currentStroke = [];
+  const pos = getMousePos(e);
+  ctx.beginPath();
+  ctx.moveTo(pos.x, pos.y);
+  ctx.strokeStyle = (mode === 'eraser') ? 'white' : color;
+  const pressure = e.pressure && e.pressure !== 0 ? e.pressure : 1;
+  const effectiveBrushSize = brushSize * pressure;
+  currentStroke.push({ x: pos.x, y: pos.y, color: (mode === 'eraser') ? 'white' : color, brushSize: effectiveBrushSize });
+}
+
+function draw(e) {
+  if (!painting) return;
+  e.preventDefault();
+  const pos = getMousePos(e);
+  const pressure = e.pressure && e.pressure !== 0 ? e.pressure : 1;
+  const effectiveBrushSize = brushSize * pressure;
+  ctx.lineWidth = effectiveBrushSize;
+  ctx.lineTo(pos.x, pos.y);
+  ctx.stroke();
+  currentStroke.push({ x: pos.x, y: pos.y, color: (mode === 'eraser') ? 'white' : color, brushSize: effectiveBrushSize });
+  ctx.beginPath();
+  ctx.moveTo(pos.x, pos.y);
+}
+
+function stopDrawing() {
+  if (currentStroke.length) {
+    drawCommands.push(currentStroke);
+    socket.emit('draw', currentStroke);
+    redoStack = [];
+  }
+  painting = false;
+}
+
+// Usar pointer events (mouse, touch, stylus)
+canvas.addEventListener('pointerdown', startDrawing);
+canvas.addEventListener('pointermove', draw);
+canvas.addEventListener('pointerup', stopDrawing);
+canvas.addEventListener('pointercancel', stopDrawing);
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = (e.clientX - rect.left);
+  const mouseY = (e.clientY - rect.top);
+  viewOffsetX -= (mouseX - viewOffsetX) * (zoomFactor - 1);
+  viewOffsetY -= (mouseY - viewOffsetY) * (zoomFactor - 1);
+  scale *= zoomFactor;
+  drawAll();
+});
+
+document.getElementById('draw').onclick = () => { mode = 'draw'; };
+document.getElementById('eraser').onclick = () => { mode = 'eraser'; };
+document.getElementById('pan').onclick = () => { mode = 'pan'; };
+document.getElementById('zoomIn').onclick = () => { zoomCanvas(1.1); };
+document.getElementById('zoomOut').onclick = () => { zoomCanvas(0.9); };
+document.getElementById('undo').onclick = () => { if (drawCommands.length) { redoStack.push(drawCommands.pop()); drawAll(); } };
+document.getElementById('redo').onclick = () => { if (redoStack.length) { drawCommands.push(redoStack.pop()); drawAll(); } };
+
+function zoomCanvas(factor) {
+  const centerX = canvas.width / 2;
+  const centerY = canvas.height / 2;
+  viewOffsetX -= (centerX - viewOffsetX) * (factor - 1);
+  viewOffsetY -= (centerY - viewOffsetY) * (factor - 1);
+  scale *= factor;
+  drawAll();
+}
+
+// --- Sincronizar con servidor ---
+
+socket.emit('request-history');
+
+socket.on('history', (history) => {
+  drawCommands = history;
+  drawAll();
+});
+
+socket.on('draw', (stroke) => {
+  drawCommands.push(stroke);
+  drawAll();
+});
+
+socket.on('clear', () => {
+  drawCommands = [];
+  redoStack = [];
+  drawAll();
+});
+
+window.addEventListener('resize', initializeCanvas);
+initializeCanvas();
+lucide.createIcons();
+</script>
+
+</body>
+</html>
