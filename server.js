@@ -1,7 +1,8 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
+const fs = require('fs');
 const path = require('path');
+const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
@@ -11,37 +12,79 @@ const io = new Server(server, {
   }
 });
 
-let drawCommands = []; // Aquí guardamos TODOS los trazos
+const DATA_FILE = path.join(__dirname, 'draw.json');
 
-app.use(express.static(path.join(__dirname, 'public'))); // Sirve archivos estáticos (tu HTML irá en 'public/')
+let drawCommands = [];
+let redoStack = [];
+
+// 🔄 Cargar datos desde archivo al iniciar
+function loadData() {
+  if (fs.existsSync(DATA_FILE)) {
+    try {
+      const data = fs.readFileSync(DATA_FILE, 'utf8');
+      drawCommands = JSON.parse(data);
+      console.log('✅ Historial cargado desde archivo.');
+    } catch (err) {
+      console.error('⚠️ Error al leer draw.json:', err);
+    }
+  }
+}
+
+// 💾 Guardar historial actual en archivo
+function saveData() {
+  fs.writeFile(DATA_FILE, JSON.stringify(drawCommands), (err) => {
+    if (err) console.error('❌ Error al guardar draw.json:', err);
+  });
+}
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 io.on('connection', (socket) => {
-  console.log('Usuario conectado:', socket.id);
+  console.log('👤 Usuario conectado:', socket.id);
 
-  // Alguien pide historial
   socket.on('request-history', () => {
     socket.emit('history', drawCommands);
   });
 
-  // Alguien dibuja algo
   socket.on('draw', (stroke) => {
     drawCommands.push(stroke);
-    socket.broadcast.emit('draw', stroke); // Enviar a todos menos al que lo hizo
+    redoStack = [];
+    socket.broadcast.emit('draw', stroke);
+    saveData();
   });
 
-  // Alguien limpia el canvas
   socket.on('clear', () => {
     drawCommands = [];
-    io.emit('clear'); // Enviar a todos
+    redoStack = [];
+    io.emit('clear');
+    saveData();
+  });
+
+  socket.on('undo', () => {
+    if (drawCommands.length > 0) {
+      const undone = drawCommands.pop();
+      redoStack.push(undone);
+      io.emit('undo');
+      saveData();
+    }
+  });
+
+  socket.on('redo', (stroke) => {
+    if (stroke && Array.isArray(stroke)) {
+      drawCommands.push(stroke);
+      io.emit('redo', stroke);
+      saveData();
+    }
   });
 
   socket.on('disconnect', () => {
-    console.log('Usuario desconectado:', socket.id);
+    console.log('👤 Usuario desconectado:', socket.id);
   });
 });
 
-// Levantar el servidor
+// Inicializar servidor
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+  loadData();
+  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
 });
